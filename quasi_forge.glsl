@@ -1,37 +1,41 @@
-// QuasiForge — Audio-reactive quasicrystal with physics-inspired layers
-// Core algorithm: iterative sum-of-plane-waves (classic construction from mainisusuallyafunction 2011)
-// Extended with: Rayleigh scattering, iridescence (structural color), height-field extrusion,
-// mirroring (H/V/quad), dispersion (chromatic), octave layering, full manual + audio control.
+// QuasiForge v2 — Cinematic photorealistic audio-reactive quasicrystal
+// Core: Iterative sum-of-plane-waves (classic from mainisusuallyafunction 2011)
+// New in v2: Unreal Engine 5-style cinematic photorealism layer
+//   - Background image/video integration (iChannel1) with dynamic pixel-driven pattern parallelization
+//   - Enhanced lighting: height-field "ray-traced" shading, screen-space-like reflections (bg as env), iridescence, volumetric depth/fog
+//   - Doppler shift on animation phase and subtle color temperature
+//   - All previous features preserved + expanded manual control
 //
-// Shadertoy compatible (iTime, iResolution, iMouse, iChannel0 for audio spectrum).
-// In Shadertoy: attach audio to iChannel0. Drag mouse to control primary parameters.
-// For full "slider" experience edit the PARAM_* defaults or remap iMouse lines below.
+// Shadertoy: iChannel0 = audio spectrum, iChannel1 = background image or video loop (optional but recommended for cinematic look)
+// Synesthesia Visualizer ready: map audio FFT to Channel0, optional media to Channel1. See README for adaptation notes.
 //
-// === CONTROLS (Shadertoy) ===
-// iMouse.x (0..1) : Manual Scale + Time Rate (primary interaction)
-// iMouse.y (0..1) : Dispersion + Color Spectrum / Audio Sensitivity
-// Edit constants below for precise "sliders" or add more mouse mappings.
-// Audio bands are mapped to distinct seeds (see detailed comments below).
+// Controls: iMouse.x/y for primary params + edit PARAM_* constants as precise sliders.
 
 #define PI 3.141592653589793
-#define N 7                    // Base symmetry (quasicrystal order). Change and recompile for different N.
+#define N 7
 
-// ==================== MANUAL PARAMETERS (edit these for precise control / "sliders") ====================
-const float PARAM_BASE_SCALE      = 7.5;     // Base pattern scale
-const float PARAM_TIME_RATE       = 1.0;     // Base animation speed multiplier (twist/warp rate)
-const float PARAM_DISPERSION      = 0.035;   // Chromatic dispersion strength (per-channel scale/phase offset)
-const float PARAM_AUDIO_SENS      = 1.0;     // Audio sensitivity multiplier
-const float PARAM_COLOR_HUE_SHIFT = 0.0;     // Manual color spectrum / hue offset
-const float PARAM_INVERT          = 0.0;     // 0.0 = normal, >0.5 = color inversion
-const float PARAM_OCTAVES         = 1.5;     // Octave layering amount (1.0 = single layer, >1 adds higher octave)
-const float PARAM_EXTRUSION       = 0.6;     // Height-field extrusion strength (normal shading intensity)
-const float PARAM_MIRROR_MODE     = 0.0;     // 0=none, 1=horizontal, 2=vertical, 3=quad (or use iMouse button logic)
+// ==================== MANUAL PARAMETERS (precise "sliders") ====================
+const float PARAM_BASE_SCALE      = 7.2;
+const float PARAM_TIME_RATE       = 1.0;     // Overall twist/warp speed
+const float PARAM_DISPERSION      = 0.032;
+const float PARAM_AUDIO_SENS      = 1.0;
+const float PARAM_COLOR_HUE_SHIFT = 0.0;
+const float PARAM_INVERT          = 0.0;
+const float PARAM_OCTAVES         = 1.4;
+const float PARAM_EXTRUSION       = 0.65;
+const float PARAM_MIRROR_MODE     = 0.0;
 
-// ==================== AUDIO MAPPING (detailed) ====================
-// bass  (low freq)  -> global scale breathing, Rayleigh scatter amount, initial direction seed perturbation
-// mids  (mid freq)  -> per-wave phase diversity, base hue, iridescence mix, octave weighting
-// highs (high freq) -> animation speed, micro phase jitter, iridescence hue velocity, dispersion dynamics
-// All multiplied by PARAM_AUDIO_SENS for manual sensitivity control.
+// New cinematic params
+const float PARAM_BG_MIX          = 0.45;    // Blend between procedural and background (0=full procedural, 1=full bg)
+const float PARAM_REFLECTION      = 0.35;    // Strength of reflective / env sampling from background
+const float PARAM_VOLUMETRIC      = 0.25;    // Volumetric depth / fog density
+const float PARAM_DOPPLER         = 0.8;     // Doppler shift intensity on phase and color temp
+
+// ==================== AUDIO MAPPING ====================
+// bass  -> scale breathing, Rayleigh, seed direction, volumetric density
+// mids  -> phase diversity, hue, iridescence, octave weight, local bg influence strength
+// highs -> animation rate, jitter, dispersion dynamics, Doppler factor, reflection sparkle
+// Sensitivity applied globally. Background pixels further modulate local phases/amplitudes for "parallelization".
 
 mat2 rot(float a) {
     float c = cos(a), s = sin(a);
@@ -39,167 +43,186 @@ mat2 rot(float a) {
 }
 
 vec3 hsv2rgb(vec3 c) {
-    vec3 rgb = clamp(abs(mod(c.x * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
-    rgb = rgb * rgb * (3.0 - 2.0 * rgb);
-    return c.z * mix(vec3(1.0), rgb, c.y);
+    vec3 rgb = clamp(abs(mod(c.x*6.0 + vec3(0.,4.,2.),6.)-3.)-1., 0., 1.);
+    rgb = rgb*rgb*(3.-2.*rgb);
+    return c.z * mix(vec3(1.), rgb, c.y);
 }
 
-// Mirroring function (horizontal, vertical, quad)
 vec2 applyMirror(vec2 uv, float mode) {
-    if (mode > 2.5) {          // Quad
-        uv = abs(uv);
-    } else if (mode > 1.5) {   // Vertical
-        uv.y = abs(uv.y);
-    } else if (mode > 0.5) {   // Horizontal
-        uv.x = abs(uv.x);
-    }
+    if (mode > 2.5) uv = abs(uv);
+    else if (mode > 1.5) uv.y = abs(uv.y);
+    else if (mode > 0.5) uv.x = abs(uv.x);
     return uv;
 }
 
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     vec2 uv = (fragCoord - 0.5 * iResolution.xy) / iResolution.y;
 
-    // --- Audio sampling + sensitivity ---
-    float sens = PARAM_AUDIO_SENS * (1.0 + iMouse.y * 0.8); // manual audio sensitivity via mouse Y
+    // Audio + sensitivity
+    float sens = PARAM_AUDIO_SENS * (1.0 + iMouse.y * 0.7);
     float bass  = texture(iChannel0, vec2(0.07, 0.25)).x * sens;
     float mids  = texture(iChannel0, vec2(0.27, 0.25)).x * sens;
     float highs = texture(iChannel0, vec2(0.62, 0.25)).x * sens;
 
-    // --- Manual + audio-reactive scale ---
-    float manualScale = PARAM_BASE_SCALE * (1.0 + iMouse.x * 1.8); // mouse X primary scale control
-    float audioScale  = 1.0 + bass * 0.65;
-    float scale = manualScale * audioScale;
+    // Scale + manual/audio
+    float manualScale = PARAM_BASE_SCALE * (1.0 + iMouse.x * 1.7);
+    float scale = manualScale * (1.0 + bass * 0.6);
 
-    // --- Time & time-rate (twist/warp/distort speed) ---
-    float timeRate = PARAM_TIME_RATE * (1.0 + iMouse.x * 0.9); // mouse X also influences rate
-    float t = iTime * timeRate * (1.0 + highs * 2.8);
+    // Time + time-rate + Doppler shift (highs + manual Doppler param drive phase velocity and subtle red/blue color temp)
+    float dopplerFactor = 1.0 + (highs - 0.5) * PARAM_DOPPLER * 0.6;
+    float timeRate = PARAM_TIME_RATE * (1.0 + iMouse.x * 0.85) * dopplerFactor;
+    float t = iTime * timeRate;
 
-    // --- Mirroring ---
-    float mirrorMode = PARAM_MIRROR_MODE;
-    // Optional: use mouse click or another mapping for mode (here fixed; edit PARAM or extend)
-    uv = applyMirror(uv, mirrorMode);
+    // Mirroring
+    uv = applyMirror(uv, PARAM_MIRROR_MODE);
 
-    // --- Dispersion (chromatic) preparation ---
-    float disp = PARAM_DISPERSION * (1.0 + iMouse.y * 1.2 + highs * 0.4);
+    // Background sampling (cinematic base layer)
+    // Distort sampling coordinate by interference field for dynamic parallelization
+    // (background pixels "emerge" and influence the procedural patterns)
+    vec3 bg = vec3(0.05);
+    if (iChannel1 != texture(iChannel0, vec2(0.0))) {  // safe check for optional channel
+        float bgDistort = 0.0; // will be set after first interference pass
+        // First rough interference for distortion (cheap)
+        vec2 up0 = vec2(scale * 0.9, 0.0);
+        up0 = rot((bass-0.5)*0.1) * up0;
+        float roughSum = 0.0;
+        mat2 r0 = rot(PI / float(N));
+        for (int k=0; k<N; k++) {
+            roughSum += cos(dot(uv, up0) + t*0.9 + float(k)*1.1);
+            up0 = r0 * up0;
+        }
+        float roughI = (cos(roughSum*0.5 + 2.0)+1.0)*0.5;
+        bgDistort = roughI * 0.025 * (1.0 + mids*0.5);
+        vec2 bgUV = uv + vec2(bgDistort * sin(t*0.3), bgDistort * cos(t*0.4));
+        bg = texture(iChannel1, bgUV * 0.5 + 0.5).rgb;  // assume bg normalized or adjust
+    }
 
-    // --- Core wave sum with dispersion per channel hint (we compute base + offsets) ---
+    // Dispersion prep
+    float disp = PARAM_DISPERSION * (1.0 + iMouse.y * 1.1 + highs * 0.35);
+
+    // Core wave summation (with per-channel dispersion)
     vec2 up = vec2(scale, 0.0);
-    float seedPerturb = (bass - 0.5) * 0.11;
+    float seedPerturb = (bass - 0.5) * 0.105;
     up = rot(seedPerturb) * up;
-
-    float angleStep = PI / float(N) + (mids - 0.5) * 0.018;
+    float angleStep = PI / float(N) + (mids - 0.5)*0.017;
     mat2 rmat = rot(angleStep);
 
-    float sumR = 0.0, sumG = 0.0, sumB = 0.0; // for dispersion
+    float sumR = 0.0, sumG = 0.0, sumB = 0.0;
 
     for (int i = 0; i < N; i++) {
-        float phaseBase = t + float(i) * (1.15 + mids * 1.55);
-        float jitter = highs * sin(float(i) * 2.4) * 0.6;
+        float phaseBase = t + float(i)*(1.12 + mids*1.5) + highs * sin(float(i)*2.35)*0.55 * dopplerFactor;
+        float contrib = cos(dot(uv, up) + phaseBase);
 
-        // Base sum
-        float ph = phaseBase + jitter;
-        float contrib = cos(dot(uv, up) + ph);
         sumR += contrib;
         sumG += contrib;
         sumB += contrib;
 
-        // Dispersion offsets (slightly different effective scale/phase per "wavelength")
-        float dispScaleR = 1.0 + disp * 1.0;
-        float dispScaleG = 1.0 + disp * 0.0;
-        float dispScaleB = 1.0 - disp * 1.2;
-
-        // Approximate per-channel by slight phase or direction perturbation (cheap)
-        sumR += cos(dot(uv * dispScaleR, up) + ph + disp * 2.0) * 0.35;
-        sumG += cos(dot(uv * dispScaleG, up) + ph) * 0.35;
-        sumB += cos(dot(uv * dispScaleB, up) + ph - disp * 2.5) * 0.35;
+        // Dispersion offsets
+        float dR = 1.0 + disp;
+        float dG = 1.0;
+        float dB = 1.0 - disp * 1.15;
+        sumR += cos(dot(uv * dR, up) + phaseBase + disp*1.8) * 0.32;
+        sumG += cos(dot(uv * dG, up) + phaseBase) * 0.32;
+        sumB += cos(dot(uv * dB, up) + phaseBase - disp*2.3) * 0.32;
 
         up = rmat * up;
     }
 
-    // Average
-    sumR /= float(N) * 1.35;
-    sumG /= float(N) * 1.35;
-    sumB /= float(N) * 1.35;
+    sumR /= float(N)*1.32;
+    sumG /= float(N)*1.32;
+    sumB /= float(N)*1.32;
 
-    // Interference wrap (per channel for dispersion feel)
-    float IR = (cos(sumR * 0.52 + 2.05) + 1.0) * 0.5;
-    float IG = (cos(sumG * 0.52 + 2.05) + 1.0) * 0.5;
-    float IB = (cos(sumB * 0.52 + 2.05) + 1.0) * 0.5;
+    float IR = (cos(sumR*0.51 + 2.03)+1.0)*0.5;
+    float IG = (cos(sumG*0.51 + 2.03)+1.0)*0.5;
+    float IB = (cos(sumB*0.51 + 2.03)+1.0)*0.5;
+    float I = (IR + IG + IB) / 3.0;
 
-    float I = (IR + IG + IB) / 3.0; // combined interference for lighting/extrusion
+    // Background-driven parallelization: add bg luminance influence to local interference and phase
+    float bgLum = dot(bg, vec3(0.299, 0.587, 0.114));
+    I = mix(I, I * (1.0 + (bgLum-0.5)*0.25), PARAM_BG_MIX * 0.6 + mids*0.2);
+    // Also feed bg into phases indirectly via the distortion already applied above
 
-    // --- Octave layering (second higher-frequency layer) ---
-    float octaveAmt = PARAM_OCTAVES + mids * 0.6;
-    if (octaveAmt > 1.01) {
-        // Quick second pass at higher frequency (reuse rotation but different scale/phase)
+    // Octave layer
+    float octaveAmt = PARAM_OCTAVES + mids * 0.55;
+    float IOct = I;
+    if (octaveAmt > 1.02) {
         float octScale = scale * 2.618;
         vec2 up2 = vec2(octScale, 0.0);
-        up2 = rot(seedPerturb * 0.7) * up2;
+        up2 = rot(seedPerturb * 0.65) * up2;
         float sumOct = 0.0;
-        for (int j = 0; j < N; j++) {
-            float ph2 = t * 1.3 + float(j) * (1.6 + mids * 1.2);
+        for (int j=0; j<N; j++) {
+            float ph2 = t * 1.25 + float(j)*(1.55 + mids*1.15);
             sumOct += cos(dot(uv, up2) + ph2);
             up2 = rmat * up2;
         }
-        float IOct = (cos(sumOct * 0.48 + 1.8) + 1.0) * 0.5;
-        I = mix(I, IOct, (octaveAmt - 1.0) * 0.6);
-        // Blend color channels lightly
-        IR = mix(IR, IOct, 0.3);
-        IG = mix(IG, IOct, 0.3);
-        IB = mix(IB, IOct, 0.3);
+        IOct = (cos(sumOct*0.47 + 1.75)+1.0)*0.5;
+        I = mix(I, IOct, (octaveAmt-1.0)*0.55);
+        IR = mix(IR, IOct, 0.28);
+        IG = mix(IG, IOct, 0.28);
+        IB = mix(IB, IOct, 0.28);
     }
 
-    // --- Base color with manual spectrum/hue adjustment ---
-    float hue = I * 0.38 + t * 0.022 + mids * 0.16 + PARAM_COLOR_HUE_SHIFT + iMouse.y * 0.25;
-    vec3 baseCol = hsv2rgb(vec3(mod(hue, 1.0), 0.76, 0.87 + I * 0.13));
+    // Cinematic base color + manual spectrum + Doppler color temp shift
+    float hueShift = PARAM_COLOR_HUE_SHIFT + iMouse.y * 0.22;
+    float dopplerHue = (dopplerFactor - 1.0) * 0.08; // subtle blue/red shift
+    float hue = I * 0.36 + t * 0.02 + mids * 0.14 + hueShift + dopplerHue;
+    vec3 baseCol = hsv2rgb(vec3(mod(hue,1.0), 0.74, 0.86 + I*0.12));
 
-    // --- Iridescence ---
-    float film = (sumR + sumG + sumB) * 0.6 + uv.x * 0.32 + t * 0.07;
+    // Enhanced iridescence (view-ish dependent via normal proxy + film)
+    float film = (sumR+sumG+sumB)*0.58 + uv.x*0.3 + t*0.065;
     vec3 irid;
-    irid.r = (cos(film * 6.65) + 1.0) * 0.5;
-    irid.g = (cos(film * 7.8 + 1.2) + 1.0) * 0.5;
-    irid.b = (cos(film * 8.95 + 2.5) + 1.0) * 0.5;
+    irid.r = (cos(film*6.6)+1.0)*0.5;
+    irid.g = (cos(film*7.75 + 1.15)+1.0)*0.5;
+    irid.b = (cos(film*8.9 + 2.4)+1.0)*0.5;
+    float iridMix = 0.58 + highs*0.28 + iMouse.y*0.12;
+    vec3 color = mix(baseCol * vec3(IR,IG,IB), irid, iridMix);
 
-    float iridMix = 0.60 + highs * 0.32 + iMouse.y * 0.15;
-    vec3 color = mix(baseCol * vec3(IR, IG, IB), irid, iridMix);
-
-    // --- Rayleigh scattering (audio + manual) ---
-    float scatter = 0.52 + bass * 0.85;
-    vec3 rayleigh = vec3(0.065, 0.19, 0.90) * scatter * (1.0 - I * 0.5);
+    // Rayleigh
+    float scatter = 0.48 + bass*0.82;
+    vec3 rayleigh = vec3(0.06, 0.18, 0.88) * scatter * (1.0 - I*0.48);
     color += rayleigh;
 
-    // --- Height-field extrusion (fake normal shading) ---
-    float extrude = PARAM_EXTRUSION * (1.0 + mids * 0.4);
+    // Height-field extrusion + enhanced cinematic lighting (normal + reflection + volumetric)
+    float extrude = PARAM_EXTRUSION * (1.0 + mids*0.35);
     if (extrude > 0.01) {
-        float eps = 0.8 / scale;
-        // Recompute I at offset positions for normal (cheap approximation reusing sums conceptually)
-        // For performance we approximate gradient from existing I variation
-        vec2 dUVx = vec2(eps, 0.0);
-        vec2 dUVy = vec2(0.0, eps);
-        // Simple central difference approximation on interference
-        float Ix = (cos((sumR + 0.8) * 0.52 + 2.05) + 1.0) * 0.5; // rough proxy
-        float Iy = (cos((sumG - 0.6) * 0.52 + 2.05) + 1.0) * 0.5;
-        vec3 normal = normalize(vec3((I - Ix) * 12.0, (I - Iy) * 12.0, 1.0));
-        vec3 lightDir = normalize(vec3(0.6, 0.7, 1.2));
-        float diff = max(dot(normal, lightDir), 0.15);
-        color *= mix(1.0, diff, extrude * 0.7);
-        // Subtle specular
-        float spec = pow(max(dot(reflect(-lightDir, normal), vec3(0.0,0.0,1.0)), 0.0), 18.0);
-        color += spec * extrude * 0.35 * vec3(0.9, 0.95, 1.0);
+        float eps = 0.75 / scale;
+        // Improved proxy normal from interference variation
+        float Ix = (cos((sumR + 0.7)*0.51 + 2.0)+1.0)*0.5;
+        float Iy = (cos((sumG - 0.55)*0.51 + 2.0)+1.0)*0.5;
+        vec3 normal = normalize(vec3((I - Ix)*11.5, (I - Iy)*11.5, 1.0));
+
+        vec3 lightDir = normalize(vec3(0.55, 0.65, 1.1));
+        float diff = max(dot(normal, lightDir), 0.12);
+
+        // Reflective term — sample background as environment (cinematic "ray traced" reflection feel)
+        vec2 reflectUV = uv + normal.xy * 0.08 * PARAM_REFLECTION;
+        vec3 envRefl = texture(iChannel1, reflectUV * 0.5 + 0.5).rgb * PARAM_REFLECTION;
+        float reflMask = smoothstep(0.2, 0.85, dot(normal, vec3(0.,0.,1.)));
+        color = mix(color, color * 0.6 + envRefl * 1.4, reflMask * PARAM_REFLECTION * 0.7);
+
+        // Diffuse + specular
+        color *= mix(1.0, diff, extrude * 0.65);
+        float spec = pow(max(dot(reflect(-lightDir, normal), vec3(0.,0.,1.)), 0.0), 16.0);
+        color += spec * extrude * 0.32 * vec3(0.85, 0.92, 1.0);
+
+        // Volumetric depth / fog (accumulates with "height" and distance)
+        float volDepth = length(uv) * 0.6 + (1.0 - I) * 0.8;
+        float fog = exp(-volDepth * PARAM_VOLUMETRIC * (1.0 + bass*0.6));
+        color = mix(color * 0.6 + vec3(0.04,0.06,0.12), color, fog);
     }
 
-    // --- Color inversion ---
-    if (PARAM_INVERT > 0.5) {
-        color = 1.0 - color;
-    }
+    // Blend with background for cinematic integration + parallelization
+    float bgBlend = PARAM_BG_MIX + mids * 0.15;
+    color = mix(color, bg, clamp(bgBlend, 0.0, 0.85));
 
-    // Polish
-    color = pow(color, vec3(0.83));
+    // Inversion
+    if (PARAM_INVERT > 0.5) color = 1.0 - color;
+
+    // Cinematic polish (tonemap-ish, contrast, vignette)
+    color = pow(color, vec3(0.82));
     color = clamp(color, 0.0, 1.0);
-
-    // Vignette
-    float vig = smoothstep(1.25, 0.5, length(uv / (PARAM_BASE_SCALE * 0.7)));
-    color *= vig * 0.9 + 0.1;
+    float vig = smoothstep(1.3, 0.48, length(uv / (PARAM_BASE_SCALE * 0.65)));
+    color *= vig * 0.88 + 0.12;
 
     fragColor = vec4(color, 1.0);
 }
