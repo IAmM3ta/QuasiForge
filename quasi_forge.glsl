@@ -77,25 +77,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     uv = applyMirror(uv, PARAM_MIRROR_MODE);
 
     // Background sampling (cinematic base layer)
-    // Distort sampling coordinate by interference field for dynamic parallelization
-    // (background pixels "emerge" and influence the procedural patterns)
+    // Always runs. If iChannel1 is unbound, Shadertoy supplies a safe default.
+    // The interference field distorts the background UV so media pixels dynamically
+    // warp and parallelize with the emerging quasicrystal patterns (luminance also feeds back into I).
     vec3 bg = vec3(0.05);
-    if (iChannel1 != texture(iChannel0, vec2(0.0))) {  // safe check for optional channel
-        float bgDistort = 0.0; // will be set after first interference pass
-        // First rough interference for distortion (cheap)
-        vec2 up0 = vec2(scale * 0.9, 0.0);
-        up0 = rot((bass-0.5)*0.1) * up0;
-        float roughSum = 0.0;
-        mat2 r0 = rot(PI / float(N));
-        for (int k=0; k<N; k++) {
-            roughSum += cos(dot(uv, up0) + t*0.9 + float(k)*1.1);
-            up0 = r0 * up0;
-        }
-        float roughI = (cos(roughSum*0.5 + 2.0)+1.0)*0.5;
-        bgDistort = roughI * 0.025 * (1.0 + mids*0.5);
-        vec2 bgUV = uv + vec2(bgDistort * sin(t*0.3), bgDistort * cos(t*0.4));
-        bg = texture(iChannel1, bgUV * 0.5 + 0.5).rgb;  // assume bg normalized or adjust
+    float bgDistort = 0.0;
+    // First rough interference pass for distortion (cheap, N=7)
+    vec2 up0 = vec2(scale * 0.9, 0.0);
+    up0 = rot((bass-0.5)*0.1) * up0;
+    float roughSum = 0.0;
+    mat2 r0 = rot(PI / float(N));
+    for (int k=0; k<N; k++) {
+        roughSum += cos(dot(uv, up0) + t*0.9 + float(k)*1.1);
+        up0 = r0 * up0;
     }
+    float roughI = (cos(roughSum*0.5 + 2.0)+1.0)*0.5;
+    bgDistort = roughI * 0.025 * (1.0 + mids*0.5);
+    vec2 bgUV = uv + vec2(bgDistort * sin(t*0.3), bgDistort * cos(t*0.4));
+    bg = texture(iChannel1, bgUV * 0.5 + 0.5).rgb;
 
     // Dispersion prep
     float disp = PARAM_DISPERSION * (1.0 + iMouse.y * 1.1 + highs * 0.35);
@@ -140,7 +139,6 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     // Background-driven parallelization: add bg luminance influence to local interference and phase
     float bgLum = dot(bg, vec3(0.299, 0.587, 0.114));
     I = mix(I, I * (1.0 + (bgLum-0.5)*0.25), PARAM_BG_MIX * 0.6 + mids*0.2);
-    // Also feed bg into phases indirectly via the distortion already applied above
 
     // Octave layer
     float octaveAmt = PARAM_OCTAVES + mids * 0.55;
